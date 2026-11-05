@@ -14,7 +14,11 @@
 
 Agents in BB answer in markdown: a table for a comparison, a numbered list for a plan, a wall of pasted output after a test run. With this plugin they answer with the component the content calls for, and you can use it. Drag a slider and the numbers recompute. Click a box in a diagram to read about it. Pick an option or fill in a form and your answer goes into your message, beside anything you type; you send it when you're ready.
 
-There is nothing to set up. Once the plugin is on, agents in your threads know the components and use them on their own.
+This fork makes UI opt-in: invoke the bundled **`/ui` skill** when you want interactive replies. Ordinary sessions receive no UI instruction blocks. The renderer, gallery, `check_ui` and `ui_examples` tools remain available.
+
+The fork keeps the upstream instruction sources in `instructions.ts` and moves their content into `skills/ui/SKILL.md`; a test checks that the skill matches them. When updating upstream, refresh the skill if that test fails. Check `bb plugin config genui` for the current Web lookups setting; the skill documents both modes.
+
+Fork: [frrad/bb-plugin-genui](https://github.com/frrad/bb-plugin-genui), based on [ComicBit/bb-plugin-genui](https://github.com/ComicBit/bb-plugin-genui). Keep the customization as a small patch on upstream.
 
 ## What an answer looks like
 
