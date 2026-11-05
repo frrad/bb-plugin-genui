@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ACTIONS, COMPONENTS } from "./core/catalog";
 import { collectLoads, compile, dataKey, evaluate, formatDiagnostics, initialState, type LoadedData } from "./core";
@@ -11,6 +12,13 @@ import {
 } from "./instructions";
 
 describe("agent instructions", () => {
+  it("keeps the opt-in skill in sync with the upstream instructions", () => {
+    const skill = readFileSync(new URL("./skills/ui/SKILL.md", import.meta.url), "utf8");
+    expect(skill).toMatch(/^---\nname: ui\ndescription: Use only when/);
+    expect(skill).toContain(`${UI_REFERENCE}\n\n${UI_REFERENCE_MORE}\n\n${CODE_WORK_INSTRUCTIONS}\n\n${AGENT_INSTRUCTIONS}\n`);
+    expect(skill).toContain("bb plugin config genui");
+  });
+
   // BB refuses a tool whose instructions pass 4096 characters (the plugin then
   // fails to load) and truncates the configure and contributed sections there.
   it("fit BB's 4096-character cap per section", () => {
