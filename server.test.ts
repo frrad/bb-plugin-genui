@@ -40,7 +40,7 @@ describe("opt-in UI instructions", () => {
     await plugin(bb);
     const config = await harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({
       thread: { parentThreadId: "parent" },
-      origin: { kind: "plugin", pluginId: "automations" },
+      origin: { kind: "fork", pluginId: "automations" },
     }));
     expect(config.tools).toEqual([]);
     expect(config.skills).toEqual([]);
