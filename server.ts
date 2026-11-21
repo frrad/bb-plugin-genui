@@ -1,7 +1,10 @@
 // bb-plugin-genui backend. Agents write ```ui and ```app blocks straight into
 // their replies, so a UI costs no extra model call. The backend:
-// - exposes optional check_ui and ui_examples tools; the bundled /ui skill
-//   teaches the language and reply conventions only when requested,
+// - decides which sessions are told about the blocks: behind the
+//   `automaticInstructions` setting (on by default), sends the language
+//   reference, code-work guide, and rules with worked examples; when off,
+//   exposes the bundled `/ui` skill so sessions opt in on demand. The optional
+//   `check_ui` and `ui_examples` tools stay available either way,
 // - loads the files specs reference with Load(path) and Snippet(path), and
 //   the images Image(path) shows,
 // - renders replies as plain markdown for clients that don't run the UI
@@ -46,6 +49,7 @@ import {
   type EnvironmentsResult,
 } from "./core/project";
 import { examplesReport } from "./examples";
+import { AGENT_INSTRUCTIONS, AGENT_INSTRUCTIONS_WEB_OFF, CODE_WORK_INSTRUCTIONS, UI_REFERENCE, UI_REFERENCE_MORE } from "./instructions";
 import { foundImageSchema, wikiPhotoSchema } from "./web/commons";
 import { locatedSchema } from "./web/geocode";
 import { createWebLookups, MAX_TILE_ZOOM } from "./web/lookups";
@@ -55,6 +59,9 @@ import type { EnvironmentDetailResult } from "./core/environments";
 
 const UI_ID = /^[a-z0-9]{10}$/;
 
+/** Thread ids kept for the code-work instruction section (see configure). */
+const MAX_PERSON_THREADS = 10_000;
+
 /** Declared here so BB lists it; the page reads it (ui/components/motion.ts). */
 export const MOTION_SETTINGS = {
   animations: {
@@ -62,6 +69,17 @@ export const MOTION_SETTINGS = {
     label: "Animations",
     description:
       "Lets inline UI move: text fades in, rows and cards rise into place, charts draw, sections glide open, maps and carousels scroll smoothly, and 3D scenes and shaders play. Off, nothing moves: everything appears at once, transitions are instant, and 3D scenes and shaders hold a still frame. The system's reduced-motion setting is honoured either way. Sandboxed apps keep their own motion.",
+    default: true,
+  },
+} as const;
+
+/** Controls whether every chat session receives the inline UI instructions automatically. */
+export const INSTRUCTION_SETTINGS = {
+  automaticInstructions: {
+    type: "boolean",
+    label: "Automatic UI instructions",
+    description:
+      "Teaches every chat session the inline UI language automatically (~15 KB of instructions) so agents use components on their own. Off: ordinary sessions receive no UI instructions; invoke the bundled /ui skill when you want interactive replies. The renderer, gallery, and check_ui / ui_examples tools stay available either way. Takes effect on new sessions.",
     default: true,
   },
 } as const;
@@ -218,6 +236,11 @@ export const rpcContract = defineRpcContract({
 export default async function plugin(bb: BbPluginApi) {
   const web = createWebLookups(bb);
   bb.settings.define(MOTION_SETTINGS);
+  const instructionSettings = bb.settings.define(INSTRUCTION_SETTINGS);
+  let automaticInstructions: boolean = (await instructionSettings.get()).automaticInstructions;
+  instructionSettings.onChange((next) => {
+    automaticInstructions = next.automaticInstructions;
+  });
   /** Image searches and Wikipedia photos (Map places) for markdown renderings: the photo found, or null (none, or lookups off). */
   const findImage = {
     search: async (query: string) => {
@@ -235,7 +258,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "check_ui",
     description:
-      "Checks a ```ui block before you put it in your reply: compile errors, files Load or Snippet can't read, wrong line ranges, errors its inputs cause once used (each slider end, toggle, option, emptied list), and the text version of what the user will see. Optional; use it for blocks with Load, Snippet or inputs. With language \"app\" it checks a ```app page instead: script syntax, network use, dialogs, genui calls outside a handler.",
+      "Checks a ```ui block before you put it in your reply: compile errors, files Load or Snippet can't read, inaccessible local images (Image, Gallery, Compare, Hotspots and Entity), wrong line ranges, errors its inputs cause once used (each slider end, toggle, option, emptied list), and the text version of what the user will see. Local images must be in this thread's workspace, $BB_THREAD_STORAGE or /tmp; copy external tool screenshots there first. Optional; use it for blocks with files, images or inputs. With language \"app\" it checks a ```app page instead: script syntax, network use, dialogs, genui calls outside a handler.",
     parameters: z.object({
       // A ```ui spec has its own, smaller cap, which compile reports.
       spec: z.string().min(1).max(MAX_APP_CHARS).describe("The block's content, without the ``` fence lines"),
@@ -251,6 +274,7 @@ export default async function plugin(bb: BbPluginApi) {
               (request) => loadThreadFile(bb, ctx.threadId, request.path, request),
               findImage,
               projectReader(project, environments, ctx.threadId),
+              (src) => loadThreadImage(bb, ctx.threadId, src),
             );
       return { content: [{ type: "text", text: report }], isError: !ok };
     },
@@ -270,15 +294,33 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  // Keep the skill discoverable without injecting its body into every session.
+  // Threads configure last found to have a person reading their replies while
+  // automatic instructions are on. BB resolves configure before it asks
+  // instruction contributors, within the same session resolution, so the
+  // reference and code-work sections reach exactly the sessions that get the
+  // rules section. Bounded; oldest forgotten first.
+  const personThreads = new Set<string>();
+  const contributedReference = `${UI_REFERENCE}\n\n${UI_REFERENCE_MORE}\n\n${CODE_WORK_INSTRUCTIONS}`;
   bb.agents.configure((context) => {
+    // Only sessions whose replies a person reads in chat: not threads another
+    // agent spawned (their reply goes back to that agent) and not threads a
+    // plugin runs (workflows, automations), except the user's side chats and
+    // the subthreads `bb genui ask` opens to try a prompt.
     const forPerson =
       context.pluginMetadata.audience === "person" ||
       (context.thread.parentThreadId === null &&
         (context.origin.pluginId === null || context.origin.pluginId === "side-chat"));
+    personThreads.delete(context.thread.id);
     if (!forPerson) return { tools: [], skills: [] };
-    return { tools: ["check_ui", "ui_examples"], skills: ["ui"] };
+    if (!automaticInstructions) {
+      return { tools: ["check_ui", "ui_examples"], skills: ["ui"] };
+    }
+    personThreads.add(context.thread.id);
+    if (personThreads.size > MAX_PERSON_THREADS) personThreads.delete(personThreads.values().next().value!);
+    const instructions = web.isOn() ? AGENT_INSTRUCTIONS : AGENT_INSTRUCTIONS_WEB_OFF;
+    return { tools: ["check_ui", "ui_examples"], skills: [], instructions };
   });
+  bb.agents.contributeInstructions(({ threadId }) => (personThreads.has(threadId) ? contributedReference : null));
 
   bb.rpc.register(rpcContract, {
     async get_ui({ id }) {
